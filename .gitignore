@@ -3,3 +3,9 @@ __pycache__/
 
 #Playwright Directory
 pw-profile/
+
+#Personal Cookies
+cookie.txt
+
+#error logs
+*.log

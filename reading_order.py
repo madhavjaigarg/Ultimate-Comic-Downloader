@@ -22,6 +22,7 @@ import os
 import re
 import sys
 import time
+from functools import lru_cache
 from pathlib import Path
 from xml.sax.saxutils import escape
 
@@ -128,9 +129,25 @@ def norm(s):
     return re.sub(r"[^a-z0-9]+", "", re.sub(r"^the\s+", "", s.lower()))
 
 
+def is_annual(series):
+    return bool(re.search(r"\bannual$", series, re.I))
+
+
 def chapter_key(title):
+    """'... Issue #645' -> '645'   '... _Annual 3' -> 'annual3'"""
+    m = re.search(r"annual\s*#?\s*(\d+)\s*$", title, re.I)
+    if m:
+        return "annual" + (m.group(1).lstrip("0") or "0")
     m = re.search(r"#\s*([\w.\-]+)\s*$", title)
     return norm(m.group(1).lstrip("0") or "0") if m else norm(title.rsplit("Issue", 1)[-1])
+
+
+def entry_keys(e):
+    """Chapter keys an order entry may appear under (annuals are often '_Annual N' chapters)."""
+    if not e["issue"]:
+        return []
+    n = norm(e["issue"].lstrip("0") or "0")
+    return ["annual" + n, n] if is_annual(e["series"]) else [n]
 
 
 def find_series(series, year, overrides):
@@ -145,10 +162,30 @@ def find_series(series, year, overrides):
     return None
 
 
+@lru_cache(maxsize=None)
 def load_series_page(nid, url):
     page = batcave.fetch_html(url)
     data = batcave.parse_page_data(page)
     return batcave.get_user_hash(page), (data or {}).get("chapters", [])
+
+
+def find_annual_parent(series, year, issue):
+    """Annuals usually live inside the parent series as '_Annual N' chapters. Look through the
+    parent's volumes (those that started on or before the annual first) for one that has it."""
+    parent = re.sub(r"\s*annual$", "", series, flags=re.I)
+    cands = []
+    for nid, title, url in batcave.search(parent):
+        m = re.search(r"\((\d{4})", title)
+        if m and norm(title).startswith(norm(parent)):
+            cands.append((int(m.group(1)), nid, url))
+    cands.sort(key=lambda c: (c[0] > int(year), abs(c[0] - int(year))))
+    want = "annual" + (issue.lstrip("0") or "0")
+    for _, nid, url in cands[:5]:
+        time.sleep(1)
+        _, chapters = load_series_page(nid, url)
+        if any(chapter_key(c["title"]) == want for c in chapters):
+            return nid, url
+    return None
 
 
 def download_entries(missing, dest, overrides, log):
@@ -160,6 +197,10 @@ def download_entries(missing, dest, overrides, log):
     for (series, year), items in groups.items():
         found = find_series(series, year, overrides)
         time.sleep(1)
+        if not found and is_annual(series):
+            found = find_annual_parent(series, year, items[0]["issue"])
+            if found:
+                print(f"  {series} ({year}): using {found[1]}")
         if not found:
             log(f"no batcave series for {series} ({year})")
             continue
@@ -171,8 +212,9 @@ def download_entries(missing, dest, overrides, log):
 
         wanted = {}
         for e in items:
-            c = by_key.get(norm(e["issue"].lstrip("0") or "0")) if e["issue"] else (
-                chapters[0] if len(chapters) == 1 else None)
+            c = next((by_key[k] for k in entry_keys(e) if k in by_key), None)
+            if not c and len(chapters) == 1 and e["issue"] in ("", "1"):
+                c = chapters[0]
             if c:
                 wanted[c["id"]] = e
             else:
