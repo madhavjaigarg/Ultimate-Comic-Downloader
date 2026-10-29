@@ -1,0 +1,5 @@
+#Cache Directory
+__pycache__/
+
+#Playwright Directory
+pw-profile/
